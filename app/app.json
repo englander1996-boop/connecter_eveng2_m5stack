@@ -1,0 +1,26 @@
+{
+  "package_id": "com.yuisho.m5sensor",
+  "edition": "202601",
+  "name": "M5 SensorCast",
+  "version": "0.1.0",
+  "min_app_version": "2.0.0",
+  "min_sdk_version": "0.0.7",
+  "tagline": "M5Stack sensor values on your lens.",
+  "description": "Technical demo. Reads M5Stack Core2 sensors (accelerometer, gyroscope, IMU temperature, battery, touch, RTC) over Wi-Fi (WebSocket) and shows them on the Even G2 lens. Tap = next page (ACCEL / GYRO / POWER / TOUCH), scroll up = previous page.",
+  "author": "yuisho",
+  "entrypoint": "index.html",
+  "permissions": [
+    {
+      "name": "network",
+      "desc": "Receives sensor data from the M5Stack over the local Wi-Fi via WebSocket.",
+      "whitelist": [
+        "http://10.47.72.204",
+        "ws://10.47.72.204"
+      ]
+    }
+  ],
+  "supported_languages": [
+    "en",
+    "ja"
+  ]
+}
