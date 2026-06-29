@@ -54,12 +54,11 @@ M5Stack Core2                Even G2 アプリ              Even G2 グラス
 
 ### app（Even G2）
 
-[Node.js](https://nodejs.org/) が必要。
+[Node.js](https://nodejs.org/)（v20+ 推奨）が必要。
 
 ```sh
 cd app
 npm install
-npm run dev      # http://localhost:5241 で起動
 ```
 
 `app/src/main.ts` の `WS_URL` を、M5Stack 本体画面に表示された IP に書き換える。
@@ -68,11 +67,44 @@ npm run dev      # http://localhost:5241 で起動
 const WS_URL = 'ws://<M5のIP>:81/'
 ```
 
-ビルドして EvenHub パッケージ（`.ehpk`）を作る場合:
+このアプリは「**フェーズ1: シミュレータで確認 → フェーズ2: 実機 G2 用に `.ehpk` 化**」の流れで作る。
+
+#### フェーズ1: シミュレータ / ブラウザで確認
+
+Windows では `run.ps1` が Vite と Even Hub Simulator をまとめて起動する。
+
+```powershell
+cd app
+.\run.ps1            # Vite + Even Hub Simulator（グラス表示）
+.\run.ps1 -WebOnly   # Vite + ブラウザ（PC で手早く確認）
+.\run.ps1 -SimOnly   # シミュレータのみ（Vite は起動済み前提）
+```
+
+手動で起動する場合:
 
 ```sh
-npm run build
+npm run dev          # Vite を http://localhost:5241 で起動
+npx @evenrealities/evenhub-simulator http://127.0.0.1:5241/
 ```
+
+#### フェーズ2: 実機 G2 用に `.ehpk` を作る
+
+公式 CLI [`@evenrealities/evenhub-cli`](https://www.npmjs.com/package/@evenrealities/evenhub-cli) でパッケージングする。
+
+```sh
+npm run build                                       # dist/ を生成
+npx @evenrealities/evenhub-cli pack app.json dist   # out.ehpk を生成（既定の出力名）
+# 出力名を変えたい場合: ... pack app.json dist -o myapp.ehpk
+```
+
+実機グラスでの確認は QR サイドロードが使える（Even Realities アプリでスキャン）。
+
+```sh
+npx @evenrealities/evenhub-cli qr --url "http://<PCのIP>:5241"
+```
+
+> `npm run build` は `dist/`（Web 成果物）を出すだけで、`.ehpk` にはならない。`.ehpk` は上記の `evenhub pack` で作る。
+> 生成した `dist/` と `*.ehpk` はビルド成果物なので `.gitignore` 済み（配布時は GitHub Releases に添付する想定）。
 
 ## 使い方
 
