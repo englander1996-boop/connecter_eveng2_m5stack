@@ -1,0 +1,13 @@
+{
+  "name": "m5-sensorcast-g2",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 0.0.0.0 --port 5241",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": { "@evenrealities/even_hub_sdk": "latest" },
+  "devDependencies": { "typescript": "^5.9.3", "vite": "^7.3.1" }
+}
