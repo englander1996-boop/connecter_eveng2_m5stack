@@ -17,13 +17,13 @@ import { createSensor, emptyState, type SensorState } from './lib/sensor'
 
 // M5 を共有 Wi-Fi(テザリング)に載せたときに M5 画面に出た IP。
 // M5 が別の IP をもらったら、ここを書き換える。
-const WS_URL = 'ws://10.47.72.204:81/'
+const WS_URL = 'ws://10.209.222.204:81/'
 
 let sensor: SensorState = emptyState()
 
 // グラス用ページ。タップで順送り。
-type Page = 'ACCEL' | 'GYRO' | 'POWER' | 'TOUCH'
-const PAGES: Page[] = ['ACCEL', 'GYRO', 'POWER', 'TOUCH']
+type Page = 'ACCEL' | 'GYRO' | 'TEMP' | 'MIC' | 'GPS' | 'POWER' | 'TOUCH'
+const PAGES: Page[] = ['ACCEL', 'GYRO', 'TEMP', 'MIC', 'GPS', 'POWER', 'TOUCH']
 let pageIdx = 0
 
 const preview = setupPreview({
@@ -66,6 +66,12 @@ function magnitude(v: { x: number; y: number; z: number }): number {
   return Math.sqrt(v.x * v.x + v.y * v.y + v.z * v.z)
 }
 
+function gpsPreviewLine(s: SensorState): string {
+  if (s.gps.state === 0) return 'no unit'
+  if (s.gps.state === 1) return `searching (sats ${s.gps.sats})`
+  return `${s.gps.lat.toFixed(6)}, ${s.gps.lon.toFixed(6)}  alt ${s.gps.alt.toFixed(0)}m  ${s.gps.speed.toFixed(1)}km/h  sats ${s.gps.sats}`
+}
+
 function linkLine(): string {
   if (sensor.connected) return `LINK ok  n=${sensor.n}`
   if (sensor.error) return `no link (${sensor.error})`
@@ -89,6 +95,34 @@ function pageLines(page: Page): LensTextLine[] {
       body.push(`x ${s.gyro.x.toFixed(1)}`)
       body.push(`y ${s.gyro.y.toFixed(1)}`)
       body.push(`z ${s.gyro.z.toFixed(1)}   T ${s.imuTemp.toFixed(1)}C`)
+      break
+    case 'TEMP':
+      title = 'TEMP'
+      body.push(`IMU ${s.imuTemp.toFixed(1)} C`)
+      body.push('(chip temp: reads a few C')
+      body.push(' above room temperature)')
+      break
+    case 'MIC':
+      title = 'MIC'
+      body.push(`level ${s.mic.level}%`)
+      body.push(`[${'#'.repeat(Math.round(s.mic.level / 5)).padEnd(20, '.')}]`)
+      body.push(`${s.mic.db.toFixed(1)} dBFS`)
+      break
+    case 'GPS':
+      title = 'GPS'
+      if (s.gps.state === 0) {
+        body.push('searching GPS unit...')
+        body.push('(check GROVE cable;')
+        body.push(' hot-plug OK)')
+      } else if (s.gps.state === 1) {
+        body.push('searching sky...')
+        body.push(`sats ${s.gps.sats}`)
+        body.push('(needs open-sky view)')
+      } else {
+        body.push(`lat ${s.gps.lat.toFixed(6)}`)
+        body.push(`lon ${s.gps.lon.toFixed(6)}`)
+        body.push(`alt ${s.gps.alt.toFixed(0)}m  ${s.gps.speed.toFixed(1)}km/h  sat ${s.gps.sats}`)
+      }
       break
     case 'POWER':
       title = 'POWER'
@@ -126,6 +160,8 @@ function render(): void {
       `ACCEL g   x ${s.acc.x.toFixed(3)}  y ${s.acc.y.toFixed(3)}  z ${s.acc.z.toFixed(3)}  |a| ${magnitude(s.acc).toFixed(3)}`,
       `GYRO dps  x ${s.gyro.x.toFixed(2)}  y ${s.gyro.y.toFixed(2)}  z ${s.gyro.z.toFixed(2)}`,
       `IMU temp  ${s.imuTemp.toFixed(1)} C`,
+      `MIC       ${s.mic.level}%   ${s.mic.db.toFixed(1)} dBFS`,
+      `GPS       ${gpsPreviewLine(s)}`,
       `BATT      ${s.batLevel}%   ${s.batMv} mV   ${s.charging ? 'charging' : 'discharging'}`,
       `TOUCH     count ${s.touch.z}   x ${Math.round(s.touch.x)}  y ${Math.round(s.touch.y)}`,
       `RTC       ${s.rtc}`,
