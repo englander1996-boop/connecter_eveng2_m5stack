@@ -1,0 +1,419 @@
+M5Stack Core2 の内蔵センサー（加速度・ジャイロ・温度・マイク音量・バッテリ・タッチ）と外付け GPS ユニットの値を、Even Realities のスマートグラス **Even G2** のレンズにリアルタイム表示する技術検証をやったので、ゼロから再現できる手順をまとめます。
+
+コード一式は GitHub に置いています。
+https://github.com/englander1996-boop/connecter_eveng2_m5stack
+
+- パートA: M5Stack Core2 側（センサーを Wi-Fi で配信する firmware）
+- パートB: Even G2 アプリ側（シミュレータで動かす Web アプリ）
+- パートC: M5 と アプリをつなぐ
+- パートD: 実機 Even G2 へアップロードする（`.ehpk`）
+
+---
+
+## 0. 全体像
+
+### やりたいこと
+
+M5Stack Core2 が内蔵センサー（加速度・ジャイロ・IMU温度・マイク音量・バッテリ・タッチ・RTC）と
+外付け GPS ユニットを読み、Wi-Fi 上の WebSocket で配信する。
+Even G2 向けの Web アプリがそれを受け取り、グラスのレンズに表示する。
+
+### データの流れ
+
+```
+┌──────────────┐   Wi-Fi(同一LAN)    ┌────────────────┐   even.ts ブリッジ   ┌──────────────┐
+│ M5Stack Core2│  ── WebSocket ──▶  │ Web アプリ(app) │ ── EvenHub SDK ──▶ │ Even G2 /     │
+│ ws サーバ:81 │   JSON ~10Hz        │ Vite + TS       │                    │ シミュレータ  │
+└──────────────┘                     └────────────────┘                    └──────────────┘
+```
+
+ポイント:
+
+- M5 は **STA モード**（自分で AP を立てるのではなく、PC やスマホと同じ Wi-Fi に参加する）。
+  M5 は DHCP で IP をもらい、本体画面に `ws://<IP>:81/` を表示する。アプリはその IP につなぐ。
+- 通信は素の **WebSocket**。BLE と違い権限まわりの不確実さが無く、ブラウザでも webview でも同じに動く。
+- 表示先は「フェーズ1: PC 上のシミュレータ」で確認してから、「フェーズ2: 実機 G2」へ `.ehpk` で配る。
+
+### 必要なもの
+
+| 区分 | 内容 |
+| ---- | ---- |
+| ハード | M5Stack Core2 本体 / USB Type-C ケーブル / （実機確認するなら）Even G2 グラス |
+| ハード(任意) | GPS 表示をやるなら GROVE 接続の GPS ユニット（GPS/BDS Unit v1.1 など、NMEA を吐くもの） |
+| ネット | M5・PC（・スマホ）が同じ Wi-Fi に入れる環境。テザリングでも可。**Wi-Fi は 2.4GHz 必須**（後述） |
+| PC ソフト | [VSCode](https://code.visualstudio.com/) + PlatformIO 拡張、[Node.js](https://nodejs.org/) v20+ |
+| アカウント | 実機配布する場合は Even Hub のアカウント（[hub.evenrealities.com](https://hub.evenrealities.com/)） |
+
+---
+
+## パートA — M5Stack Core2 側（firmware）
+
+### A-1. PlatformIO 環境を作る
+
+詳しい画面手順は [リポジトリの references/Readme.md](https://github.com/englander1996-boop/connecter_eveng2_m5stack/blob/main/references/Readme.md) を参照。要点だけ:
+
+1. M5Stack Core2 の USB ドライバ（CP210x または CH9102）を入れる（Windows のみ）。
+2. VSCode に「PlatformIO IDE」拡張を入れて再起動する。
+3. M5 を USB で接続し、COM ポート番号を確認する（デバイスマネージャ）。
+
+### A-2. まず `hello` で疎通確認（任意だが推奨）
+
+「書き込み環境 → M5 本体」が通っているかを最小プログラムで確認する。
+`firmware/hello/` を PlatformIO で開き、Build → Upload。
+画面に `Hello M5!` が出てタップでカウントが増えれば OK。
+
+`firmware/hello/platformio.ini` の要点:
+
+```ini
+[env:m5stack-core2]
+platform = espressif32
+board = m5stack-core2
+framework = arduino
+monitor_speed = 115200
+upload_port = COM5            ; ← 自分の COM 番号に合わせる
+lib_deps = m5stack/M5Unified  ; 本体制御の公式ライブラリ
+```
+
+> 書き込みで `Connecting...` のまま止まるときは、その表示中に本体の電源/リセットを押す。
+
+### A-3. `sensorcast` でセンサーを配信する
+
+`firmware/sensorcast/` が本番の firmware。やっていること（`src/main.cpp`）:
+
+- `secrets.h` の Wi-Fi に STA で参加し、IP を取得して画面に表示する。
+- `WebSocketsServer`（ポート 81）を起動する。
+- 100ms ごと（10Hz）に全センサーを読み、接続中の全クライアントへ JSON をブロードキャストする。
+- 内蔵マイクを短時間録音して音量（RMS → dBFS）を算出する。
+- GROVE の GPS ユニットを **ポート（A/B/C）×ボーレート（115200/9600）の総当たりで常時探索**し、
+  見つかれば NMEA を TinyGPSPlus で解析する。後から挿しても数秒で自動検出される。
+
+#### Wi-Fi 情報を設定する
+
+`firmware/sensorcast/src/secrets.h.example` を、同じフォルダの **`secrets.h`** にコピーして書き換える。
+
+```c
+#pragma once
+#define WIFI_SSID "your-ssid"
+#define WIFI_PASS "your-password"
+```
+
+> `secrets.h` は手元だけのファイル。リポジトリにはコミットしない（`.gitignore` 済み）。
+> テンプレートの `secrets.h.example` だけを共有する。
+
+:::note warn
+**周波数帯は 2.4GHz 必須（一番ハマる）**
+
+M5Stack Core2（ESP32）は **2.4GHz 帯の Wi-Fi にしか繋がらない。5GHz は仕様上ハード的に非対応**。
+5GHz の SSID を指定すると、設定が正しくても本体画面が `WiFi connecting...` のまま永遠に進まない。
+
+- 自宅ルータが 2.4GHz と 5GHz を**同じ SSID 名**でまとめている（バンドステアリング）と、5GHz を掴んで繋がらないことがある。ルータ設定で 2.4GHz 用の SSID を分けて、そちらを `secrets.h` に書く。
+- スマホのテザリングを使う場合も、テザリングの**周波数帯を 2.4GHz に設定**しておく（5GHz のままだと繋がらない）。
+:::
+
+#### 書き込んで IP を確認する
+
+`firmware/sensorcast/platformio.ini` の `upload_port` を自分の COM に合わせて Build → Upload。
+起動すると本体画面に次が出る。**この IP を後でアプリに設定する**。
+
+```
+SensorCast
+WiFi <SSID>
+ws://192.168.x.x:81/     ← この IP
+clients 0  n 0
+acc ... / gyr ... / bat ... / mic ... / gps ...
+```
+
+### A-4. 配信フォーマット（WebSocket の中身）
+
+10Hz でこのコンパクト JSON が飛んでくる。アプリ側（`sensor.ts`）はこれを解釈する。
+
+```jsonc
+{
+  "n":   123,                       // 送信連番（増えていれば生きている）
+  "acc": [0.01, -0.02, 0.99],       // 加速度 g (x,y,z)
+  "gyr": [0.5, -1.2, 0.0],          // 角速度 deg/s (x,y,z)
+  "tmp": 28.5,                      // IMU 温度 degC（チップ温度。気温より数℃高め）
+  "bat": [87, 4012, 0],             // [残量%, 電圧mV, 充電中0/1]
+  "tch": [120, 80, 1],              // タッチ [x, y, 本数]
+  "rtc": "14:03:27",                // 時刻 HH:MM:SS
+  "up":  45200,                     // 稼働 ms
+  "mic": [11, -53.2],               // マイク音量 [レベル0-100, dBFS]
+  "gps": [2, 35.681, 139.767, 40.0, 0.0, 8]
+        // GPS [状態, 緯度, 経度, 高度m, 速度km/h, 衛星数]
+        // 状態: 0 ユニット未検出 / 1 測位待ち / 2 測位あり
+}
+```
+
+> 新しいセンサーを足したいときは、`main.cpp` の `sample()` と `snprintf` のフォーマット、
+> アプリ側 `sensor.ts` の `Wire` 型と `apply()` の両方に同じキーを足す。
+
+:::note info
+**フリーズ対策の小ネタ**: M5Unified の `M5.Mic.record()` は内部の録音タスクが詰まると
+**完了待ちで無限ブロック**し、loop 全体（画面・WebSocket）が固まる。
+`M5.Mic.isRecording()` を見て空いているときだけ呼ぶのが安全。保険として
+`esp_task_wdt`（タスクウォッチドッグ）を loop に仕掛けておくと、固まっても自動リブートで復旧する。
+:::
+
+---
+
+## パートB — Even G2 アプリ側（シミュレータで動かす）
+
+### B-1. Even Hub のしくみ（3点セット）
+
+Even G2 のアプリは「ただの Web アプリ（HTML/TS）」で、3つの npm パッケージで開発する。
+
+| パッケージ | 役割 |
+| ---------- | ---- |
+| `@evenrealities/even_hub_sdk` | アプリ ↔ グラスの**ブリッジ SDK**。レンズに文字を描く / タップ等のイベントを受ける |
+| `@evenrealities/evenhub-simulator` | PC 上で**グラス画面を再現**するシミュレータ。dev サーバの URL を渡して起動する |
+| `@evenrealities/evenhub-cli` | `.ehpk` への**パッケージング**、QR サイドロード、提出を行う CLI（`evenhub` / `eh`） |
+
+レンズの描画は「**テキストコンテナ**を並べる」モデル。座標 (x,y)・幅・高さを持つテキストを
+画面（**576 × 136 px** 相当）に配置する。行数は実質 5〜6 行が限界なので、情報はページに分ける。
+
+### B-2. プロジェクトをゼロから作る
+
+リポジトリの `app/` は次の手順で作れる。
+
+```sh
+mkdir app && cd app
+npm init -y
+npm install -D typescript vite
+npm install @evenrealities/even_hub_sdk
+```
+
+最小構成として次を用意する（リポジトリの実物が見本）:
+
+- `index.html` — `<div id="app">` と `<script type="module" src="/src/main.ts">` だけ。
+- `vite.config.ts` — dev サーバを `host: '0.0.0.0'` で公開（スマホ webview から見えるように）、`port: 5241`。
+- `tsconfig.json` — `strict` な ESNext/bundler 設定。
+- `app.json` — 実機配布用のマニフェスト（B-5 で詳述）。
+- `package.json` の scripts:
+
+```json
+{
+  "scripts": {
+    "dev": "vite --host 0.0.0.0 --port 5241",
+    "build": "vite build",
+    "preview": "vite preview"
+  }
+}
+```
+
+### B-3. ソース構造（このアプリの中身）
+
+`app/src/` は「再利用できる薄いライブラリ（`lib/`）」と「アプリ本体（`main.ts`）」に分かれている。
+
+| ファイル | 役割 | 注意点 |
+| -------- | ---- | ------ |
+| `lib/even.ts` | **EvenHub SDK の薄いラッパ**。ブリッジ接続（タイムアウト付き）、レンズ描画、イベント（click/double/up/down）の正規化 | グラス未接続でも落ちないよう、接続失敗時は `connected=false` の mock 動作にフォールバックする |
+| `lib/sensor.ts` | **M5 からの WebSocket クライアント**。JSON を `SensorState` に取り込む。切断時は2秒間隔で自動再接続 | `main.ts` から M5 の IP を渡して接続先を指定する |
+| `lib/preview.ts` | **ブラウザ用のデバッグ UI**。状態・全データ一覧・イベントログ・テストボタンを出す | グラスに出ない全データもここで一覧できる |
+| `lib/storage.ts` | `localStorage` の薄ラッパ | — |
+| `main.ts` | **アプリ本体**。M5 を受けて、7ページ（ACCEL / GYRO / TEMP / MIC / GPS / POWER / TOUCH）に分けてレンズへ描く | 先頭の `WS_URL` を M5 の IP に合わせる（C-2） |
+
+#### 描画とイベントの要点（`even.ts`）
+
+- **描画**: `render(lines)` に「テキスト行の配列」を渡す。各行は `{id, name, content, x, y, width, height}`。
+  最初の描画は `createStartUpPageContainer`、2回目以降は `rebuildPageContainer` を使う（内部で自動切替）。
+- **イベント捕捉**: 画面全体（576×136）に `content: ' '` の**不可視テキスト**を 1 枚重ね、
+  それに `isEventCapture: 1` を付けてタップ/スクロールの sink にする（**text-capture 方式**）。
+  - これは公式リファレンス（even-dev の hello）と同じ方式。List を使う方式だと「上スクロール（up）」が
+    初期 index=0 から発火せず詰むので、text-capture にしている。**ここは作り直すとき要注意**。
+  - 受け取れるイベント: `click`（タップ）/ `double`（ダブルタップ）/ `up`（上スクロール）/ `down`（下スクロール）。
+
+### B-4. シミュレータで動かす（フェーズ1）
+
+M5 が A-3 まで終わって配信していれば、PC を同じ Wi-Fi につないだ状態で次を実行する。
+
+Windows（同梱の `run.ps1` が Vite とシミュレータをまとめて面倒見る）:
+
+```powershell
+cd app
+.\run.ps1            # Vite + Even Hub Simulator（グラス画面）
+.\run.ps1 -WebOnly   # Vite + ブラウザ（PC で全データを手早く確認）
+.\run.ps1 -SimOnly   # シミュレータのみ（Vite は別で起動済みの前提）
+```
+
+手動で起動する場合（OS 共通）:
+
+```sh
+cd app
+npm install
+npm run dev          # http://localhost:5241
+# 別ターミナルで:
+npx @evenrealities/evenhub-simulator http://127.0.0.1:5241/
+```
+
+シミュレータのグラス画面にセンサー値が出て、タップでページが進めば成功。
+ブラウザ（`-WebOnly`）では全データ一覧とテストボタン（Next/Prev）で動作確認できる。
+
+### B-5. 配布マニフェスト `app.json`
+
+実機配布のときに使う。主なフィールド:
+
+```jsonc
+{
+  "package_id": "com.example.m5sensor", // 一意なアプリ ID（逆ドメイン）
+  "name": "M5 SensorCast",
+  "version": "0.2.0",
+  "min_app_version": "2.0.0",           // Even アプリの最低バージョン
+  "min_sdk_version": "0.0.7",           // SDK の最低バージョン
+  "entrypoint": "index.html",
+  "permissions": [
+    {
+      "name": "network",                // ネットワーク利用の宣言
+      "desc": "Receives sensor data ... via WebSocket.",
+      "whitelist": [                     // 接続を許可する宛先。M5 の IP に合わせる
+        "http://<M5のIP>",
+        "ws://<M5のIP>"
+      ]
+    }
+  ],
+  "supported_languages": ["en", "ja"]
+}
+```
+
+:::note warn
+`whitelist` に M5 の IP を入れないと、**実機ではシミュレータで動いていても WebSocket 接続がブロックされる**。
+M5 の IP が変わったら `app.json` の whitelist と `main.ts` の `WS_URL` の両方を直す（C 参照）。
+:::
+
+---
+
+## パートC — M5 と アプリをつなぐ
+
+### C-1. 同じ Wi-Fi に乗せる
+
+肝は、**M5 と「受け側」を同じ Wi-Fi / 同じ LAN に入れる**こと。M5 は STA モードなので自分で電波を出さず、
+あくまで既存の Wi-Fi に参加する。受け側が何か（PC のシミュレータか実機グラス）で、実運用は次の 2 パターンになる。
+
+| パターン | 用途 | 構成 |
+| -------- | ---- | ---- |
+| **① 同じ Wi-Fi ルータ** | フェーズ1（シミュレータ） | M5 と PC を、家／オフィスの **2.4GHz Wi-Fi ルータ**に両方つなぐ。PC 上で Vite + シミュレータを動かす |
+| **② スマホのテザリング** | フェーズ2（実機グラス） | スマホのテザリング（**2.4GHz**）に M5 を参加させ、その**同じスマホ**の EvenHub アプリで実機グラスを動かす。PC も確認に使うなら同じテザリングに乗せる |
+
+> どちらも **2.4GHz が条件**（A-3 の警告参照）。①でルータが 5GHz しか掴ませない場合や、②でテザリングが
+> 5GHz になっている場合は、M5 がそもそも Wi-Fi に乗れない。
+>
+> ②のテザリングは、機種によって「**接続端末どうしの通信**（AP isolation）」を塞いでいることがある。
+> その場合は M5 とスマホが同じテザリングに居ても WebSocket が通らないので、①のルータ方式で確認する。
+
+### C-2. IP を合わせる（ここが一番ハマる）
+
+1. M5 本体画面に出ている IP（例 `192.168.x.x`）を確認する。
+2. `app/src/main.ts` の先頭を書き換える。
+
+   ```ts
+   const WS_URL = 'ws://<M5のIP>:81/'
+   ```
+
+3. 実機配布もするなら `app/app.json` の `permissions[].whitelist` も同じ IP に直す。
+
+> M5 は DHCP なので、再接続や別の Wi-Fi に乗せると IP が変わることがある。
+> 特に**スマホのテザリングは OFF→ON するたびにネットワークごと変わる**機種が多い。
+
+リポジトリには、この書き換えを自動化する `app/update-ip.ps1` を入れてある。
+LAN をスキャンして M5（ポート81）を見つけ、`WS_URL` と `whitelist` を書き換えて再パックまで行う。
+
+```powershell
+cd app
+.\update-ip.ps1           # 探す → 書き換え → 再パック
+.\update-ip.ps1 -NoPack   # 書き換えのみ
+```
+
+### C-3. つながったかの見方
+
+- M5 本体画面の `clients` が 1 以上になる（接続中のクライアント数）。
+- アプリ側はリンク状態を `LINK ok n=...`（`n` が増え続ける）で表示する。
+  `connecting M5...` のままなら IP/同一 Wi-Fi/ポート81 を疑う。
+
+---
+
+## パートD — 実機 Even G2 へアップロードする
+
+### D-1. まず QR サイドロードで実機確認（ビルド不要）
+
+ホットリロードのまま実機グラスで確認できる。PC で dev サーバを動かしたまま:
+
+```sh
+npx @evenrealities/evenhub-cli qr --url "http://<PCのLAN IP>:5241"
+# または: npx @evenrealities/evenhub-cli qr -i <PCのIP> -p 5241
+```
+
+表示された QR を Even Realities アプリでスキャンすると、実機グラスにアプリが載る。
+（QR サイドロードは PC の dev サーバから都度読み込む方式なので、PC が同じ LAN に居る間だけ動く。
+単体で持ち歩くなら D-2 の `.ehpk` を作る。）
+
+### D-2. `.ehpk` にパッケージングする（配布物を作る）
+
+確認できたら、公式 CLI で配布用パッケージを作る。
+
+```sh
+cd app
+npm run build                                       # dist/ を生成
+npx @evenrealities/evenhub-cli pack app.json dist   # out.ehpk を生成（既定の出力名）
+# 出力名を変える: npx @evenrealities/evenhub-cli pack app.json dist -o myapp.ehpk
+# package_id の空き確認: ... pack app.json dist --check
+```
+
+- `.ehpk` は先頭マジック `EHPK` の独自バイナリ形式（ただの zip ではない）。
+- `npm run build` が出すのは `dist/`（Web 成果物）だけ。`.ehpk` は上の `pack` で別に作る。
+- `dist/` と `*.ehpk` はビルド成果物なので `.gitignore` 済み。配布したいときは
+  **GitHub Releases に添付**するのがきれい（リポジトリ本体には入れない）。
+
+### D-3. 提出 / インストール
+
+作った `.ehpk` を Even Hub の開発者ポータル（[hub.evenrealities.com](https://hub.evenrealities.com/)）から
+アップロード・提出する。同じ `version` のまま上げ直すと「既存ビルドを置き換える」確認が出るので、
+中身を変えたら `app.json` の `version` を上げておくと管理しやすい。
+
+---
+
+## トラブルシューティング
+
+| 症状 | 確認すること |
+| ---- | ---- |
+| M5 が `WiFi connecting...` のまま | **Wi-Fi が 2.4GHz か（5GHz は非対応で繋がらない）**、`secrets.h` の SSID/PASS、電波の届く範囲か |
+| テザリングで M5 だけ繋がらない | テザリングの周波数帯が 2.4GHz か、端末間通信（AP isolation）が無効になっているか |
+| 書き込みが `Connecting...` で止まる | `Connecting...` 表示中に本体リセット押下、`upload_port` の COM 番号、ケーブル/ドライバ |
+| アプリが `connecting M5...` のまま | M5 と PC が同一 Wi-Fi か、`WS_URL` の IP、M5 画面の `ws://...:81/` と一致しているか |
+| 実機だけ繋がらない（シミュレータは OK） | `app.json` の `whitelist` に M5 の IP（http と ws の両方）が入っているか |
+| GPS が「測位待ち」のまま | 空が見える場所か（屋内はほぼ不可、窓際で数個）。初回測位は数十秒〜数分かかる |
+| 本体がフリーズする | `M5.Mic.record()` のブロッキングに注意（A-4 の note 参照）。ウォッチドッグ推奨 |
+| 上スクロール（前ページ）が効かない | `even.ts` の text-capture 方式（全画面 `isEventCapture:1`）を崩していないか |
+| シミュレータが起動しない | Node v20+ か、`npm install` 済みか、dev サーバ（5241）が先に上がっているか |
+
+---
+
+## ゼロから再現する最短手順（まとめ）
+
+```text
+A. M5 側
+  1) VSCode + PlatformIO、USB ドライバを用意
+  2) firmware/hello を Upload して疎通確認（任意）
+  3) firmware/sensorcast/src/secrets.h を作成（SSID/PASS）
+  4) upload_port を自分の COM に直して Upload
+  5) 本体画面の ws://<IP>:81/ を控える
+     （GPS を出すなら GROVE ポートに GPS ユニットを挿す。自動検出される）
+
+B. アプリ側（シミュレータ）
+  6) cd app && npm install
+  7) main.ts の WS_URL を控えた IP に書き換え（または update-ip.ps1）
+  8) (Windows) .\run.ps1  /  (共通) npm run dev + evenhub-simulator
+  9) シミュレータにセンサー値、タップでページ送りを確認
+
+C. つなぐ
+  10) M5・PC を同じ Wi-Fi に / clients が 1、LINK ok を確認
+
+D. 実機 G2
+  11) evenhub-cli qr で実機ホットリロード確認
+  12) app.json の whitelist を M5 の IP に合わせる
+  13) npm run build → evenhub-cli pack app.json dist で out.ehpk
+  14) Even Hub ポータルへアップロード / 配布は GitHub Releases に .ehpk 添付
+```
+
+---
+
+以上です。「マイコンのセンサー値をスマートグラスに出す」だけなら、BLE や専用プロトコルに触らず
+**WebSocket + Web アプリ**という Web 開発の道具立てだけで完結するのが Even G2 の面白いところでした。
