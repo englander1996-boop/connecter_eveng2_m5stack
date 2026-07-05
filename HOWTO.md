@@ -1,14 +1,10 @@
-# HOWTO — M5Stack Core2 のセンサー値を Even G2 に出すまで（ゼロから再現）
-
-このドキュメントは、このリポジトリの成果物（M5Stack のセンサー値を Even G2 のレンズに表示するアプリ）を
-**何もない状態から作り直せる**ように、一連の流れをまとめたもの。
+# HOWTO — M5Stack Core2 のセンサー値を Even G2 に出力
 
 - パートA: M5Stack Core2 側（センサーを Wi-Fi で配信する firmware）
 - パートB: Even G2 アプリ側（シミュレータで動かす Web アプリ）
 - パートC: M5 と アプリをつなぐ
 - パートD: 実機 Even G2 へアップロードする（`.ehpk`）
 
-各パートは独立して読めるが、順番どおりに進めると一番つまずきにくい。
 
 ---
 
@@ -40,7 +36,7 @@ Wi-Fi 上の WebSocket で配信する。Even G2 向けの Web アプリがそ�
 | 区分 | 内容 |
 | ---- | ---- |
 | ハード | M5Stack Core2 本体 / USB Type-C ケーブル / （実機確認するなら）Even G2 グラス |
-| ネット | M5・PC（・スマホ）が同じ Wi-Fi に入れる環境。テザリングでも可 |
+| ネット | M5・PC（・スマホ）が同じ Wi-Fi に入れる環境。テザリングでも可。**Wi-Fi は 2.4GHz 必須**（後述） |
 | PC ソフト | [VSCode](https://code.visualstudio.com/) + PlatformIO 拡張、[Node.js](https://nodejs.org/) v20+ |
 | アカウント | 実機配布する場合は Even Hub のアカウント（[hub.evenrealities.com](https://hub.evenrealities.com/)） |
 
@@ -96,6 +92,13 @@ lib_deps = m5stack/M5Unified  ; 本体制御の公式ライブラリ
 
 > `secrets.h` は手元だけのファイル。リポジトリにはコミットしない（`.gitignore` 済み）。
 > テンプレートの `secrets.h.example` だけを共有する。
+
+> **⚠️ 周波数帯は 2.4GHz 必須（一番ハマる）**
+> M5Stack Core2（ESP32）は **2.4GHz 帯の Wi-Fi にしか繋がらない。5GHz は仕様上ハード的に非対応**。
+> 5GHz の SSID を指定すると、設定が正しくても本体画面が `WiFi connecting...` のまま永遠に進まない。
+> - 自宅ルータが 2.4GHz と 5GHz を**同じ SSID 名**でまとめている（バンドステアリング）と、5GHz を掴んで繋がらないことがある。
+>   ルータ設定で 2.4GHz 用の SSID を分けて、そちらを `secrets.h` に書く。
+> - スマホのテザリングを使う場合も、テザリングの**周波数帯を 2.4GHz に設定**しておく（5GHz のままだと繋がらない）。
 
 #### 書き込んで IP を確認する
 
@@ -259,8 +262,19 @@ npx @evenrealities/evenhub-simulator http://127.0.0.1:5241/
 
 ### C-1. 同じ Wi-Fi に乗せる
 
-M5（A-3 で `secrets.h` に設定した Wi-Fi）と、PC（シミュレータを動かす）または実機グラスを動かすスマホを、
-**同じ Wi-Fi / 同じ LAN** に入れる。スマホのテザリングに M5 と PC を相乗りさせる形でもよい。
+肝は、**M5 と「受け側」を同じ Wi-Fi / 同じ LAN に入れる**こと。M5 は STA モードなので自分で電波を出さず、
+あくまで既存の Wi-Fi に参加する。受け側が何か（PC のシミュレータか実機グラス）で、実運用は次の 2 パターンになる。
+
+| パターン | 用途 | 構成 |
+| -------- | ---- | ---- |
+| **① 同じ Wi-Fi ルータ** | フェーズ1（シミュレータ） | M5 と PC を、家／オフィスの **2.4GHz Wi-Fi ルータ**に両方つなぐ。PC 上で Vite + シミュレータを動かす |
+| **② スマホのテザリング** | フェーズ2（実機グラス） | スマホのテザリング（**2.4GHz**）に M5 を参加させ、その**同じスマホ**の EvenHub アプリで実機グラスを動かす。PC も確認に使うなら同じテザリングに乗せる |
+
+> どちらも **2.4GHz が条件**（A-3 の警告参照）。①でルータが 5GHz しか掴ませない場合や、②でテザリングが
+> 5GHz になっている場合は、M5 がそもそも Wi-Fi に乗れない。
+>
+> ②のテザリングは、機種によって「**接続端末どうしの通信**（AP isolation）」を塞いでいることがある。
+> その場合は M5 とスマホが同じテザリングに居ても WebSocket が通らないので、①のルータ方式で確認する。
 
 ### C-2. IP を合わせる（ここが一番ハマる）
 
@@ -325,7 +339,8 @@ npx @evenrealities/evenhub-cli pack app.json dist   # out.ehpk を生成（既�
 
 | 症状 | 確認すること |
 | ---- | ---- |
-| M5 が `WiFi connecting...` のまま | `secrets.h` の SSID/PASS、Wi-Fi の電波・2.4GHz 対応 |
+| M5 が `WiFi connecting...` のまま | **Wi-Fi が 2.4GHz か（5GHz は非対応で繋がらない）**、`secrets.h` の SSID/PASS、電波の届く範囲か |
+| テザリングで M5 だけ繋がらない | テザリングの周波数帯が 2.4GHz か、端末間通信（AP isolation）が無効になっているか |
 | 書き込みが `Connecting...` で止まる | `Connecting...` 表示中に本体リセット押下、`upload_port` の COM 番号、ケーブル/ドライバ |
 | アプリが `connecting M5...` のまま | M5 と PC が同一 Wi-Fi か、`WS_URL` の IP、M5 画面の `ws://...:81/` と一致しているか |
 | 実機だけ繋がらない（シミュレータは OK） | `app.json` の `whitelist` に M5 の IP（http と ws の両方）が入っているか |
