@@ -94,6 +94,17 @@ npm install
 const WS_URL = 'ws://<M5のIP>:81/'
 ```
 
+### IP が変わったとき（テザリングの入れ直し等）
+
+テザリングを OFF→ON すると M5 の IP はネットワークごと変わる。手で直す代わりに `update-ip.ps1` が使える。
+ネットワーク上の M5 を自動で探し、`WS_URL`（main.ts）と whitelist（app.json）を書き換えて `out.ehpk` の再パックまで行う。
+
+```powershell
+cd app
+.\update-ip.ps1           # 探す → 書き換え → 再パック
+.\update-ip.ps1 -NoPack   # 書き換えのみ（シミュレータ/QRサイドロードならこれで十分）
+```
+
 このアプリは「**フェーズ1: シミュレータで確認 → フェーズ2: 実機 G2 用に `.ehpk` 化**」の流れで作る。
 
 #### フェーズ1: シミュレータ / ブラウザで確認
